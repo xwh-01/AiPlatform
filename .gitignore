@@ -1,0 +1,16 @@
+node_modules/
+dist/
+build/
+
+*.log
+*.tmp
+
+.env
+.env.*
+!.env.example
+
+.idea/
+.vscode/
+
+uploads/
+*.cover.out
