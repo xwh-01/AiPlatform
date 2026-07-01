@@ -28,15 +28,39 @@ func IsExistUser(username string) (bool, *model.User) {
 	return true, user
 }
 
-func Register(username, email, password string) (*model.User, bool) {
+func IsExistEmail(email string) (bool, *model.User) {
+	user, err := mysql.GetUserByEmail(email)
+
+	if err == gorm.ErrRecordNotFound || user == nil {
+		return false, nil
+	}
+
+	return true, user
+}
+
+func IsExistAccount(account string) (bool, *model.User) {
+	user, err := mysql.GetUserByAccount(account)
+
+	if err == gorm.ErrRecordNotFound || user == nil {
+		return false, nil
+	}
+
+	return true, user
+}
+
+func Register(username, email, password string) (*model.User, error) {
 	if user, err := mysql.InsertUser(&model.User{
 		Email:    email,
 		Name:     username,
 		Username: username,
 		Password: utils.MD5(password),
 	}); err != nil {
-		return nil, false
+		return nil, err
 	} else {
-		return user, true
+		return user, nil
 	}
+}
+
+func IsDuplicateEntryError(err error) bool {
+	return mysql.IsDuplicateEntryError(err)
 }

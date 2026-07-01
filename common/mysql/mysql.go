@@ -3,10 +3,12 @@ package mysql
 import (
 	"aiplatform/config"
 	"aiplatform/model"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	mysqlDriver "github.com/go-sql-driver/mysql"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -76,4 +78,21 @@ func GetUserByUsername(username string) (*model.User, error) {
 	user := new(model.User)
 	err := DB.Where("username = ?", username).First(user).Error
 	return user, err
+}
+
+func GetUserByEmail(email string) (*model.User, error) {
+	user := new(model.User)
+	err := DB.Where("email = ?", email).First(user).Error
+	return user, err
+}
+
+func GetUserByAccount(account string) (*model.User, error) {
+	user := new(model.User)
+	err := DB.Where("username = ? OR email = ?", account, account).First(user).Error
+	return user, err
+}
+
+func IsDuplicateEntryError(err error) bool {
+	var mysqlErr *mysqlDriver.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1062
 }
