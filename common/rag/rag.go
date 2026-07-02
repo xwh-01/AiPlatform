@@ -27,6 +27,11 @@ type RAGQuery struct {
 	retriever retriever.Retriever
 }
 
+type ragChunk struct {
+	Content string
+	Section string
+}
+
 const (
 	defaultChunkSize    = 800
 	defaultChunkOverlap = 150
@@ -60,16 +65,13 @@ func NewRAGIndexer(filename, embeddingModel string) (*RAGIndexer, error) {
 		KeyPrefix: redisPkg.GenerateIndexNamePrefix(filename),
 		BatchSize: 10,
 		DocumentToHashes: func(ctx context.Context, doc *schema.Document) (*redisIndexer.Hashes, error) {
-			source := ""
-			if s, ok := doc.MetaData["source"].(string); ok {
-				source = s
-			}
+			metadata := formatDocumentMetadata(doc.MetaData)
 
 			return &redisIndexer.Hashes{
 				Key: fmt.Sprintf("%s:%s", filename, doc.ID),
 				Field2Value: map[string]redisIndexer.FieldValue{
 					"content":  {Value: doc.Content, EmbedKey: "vector"},
-					"metadata": {Value: source},
+					"metadata": {Value: metadata},
 				},
 			}, nil
 		},
@@ -95,7 +97,7 @@ func (r *RAGIndexer) IndexFile(ctx context.Context, filePath string) error {
 	}
 
 	chunkSize, chunkOverlap := getChunkConfig()
-	chunks := splitText(string(content), chunkSize, chunkOverlap)
+	chunks := splitDocument(string(content), chunkSize, chunkOverlap)
 	if len(chunks) == 0 {
 		return fmt.Errorf("file content is empty")
 	}
@@ -104,9 +106,10 @@ func (r *RAGIndexer) IndexFile(ctx context.Context, filePath string) error {
 	for i, chunk := range chunks {
 		docs = append(docs, &schema.Document{
 			ID:      fmt.Sprintf("chunk_%04d", i+1),
-			Content: chunk,
+			Content: chunk.Content,
 			MetaData: map[string]any{
 				"source":      filePath,
+				"section":     chunk.Section,
 				"chunk_index": i,
 				"chunk_total": len(chunks),
 			},
@@ -119,6 +122,22 @@ func (r *RAGIndexer) IndexFile(ctx context.Context, filePath string) error {
 	}
 
 	return nil
+}
+
+func splitDocument(text string, chunkSize, overlap int) []ragChunk {
+	contents := splitText(text, chunkSize, overlap)
+	if len(contents) == 0 {
+		return nil
+	}
+
+	chunks := make([]ragChunk, 0, len(contents))
+	for _, content := range contents {
+		chunks = append(chunks, ragChunk{
+			Content: content,
+			Section: extractFirstMarkdownHeading(content),
+		})
+	}
+	return chunks
 }
 
 func splitText(text string, chunkSize, overlap int) []string {
@@ -163,7 +182,7 @@ func splitText(text string, chunkSize, overlap int) []string {
 			previous := strings.TrimSpace(current.String())
 			flushCurrent()
 
-			prefix := suffixByRunes(previous, overlap)
+			prefix := suffixByBoundary(previous, overlap)
 			if prefix != "" && len([]rune(prefix))+2+paragraphLen <= chunkSize {
 				current.WriteString(prefix)
 				current.WriteString("\n\n")
@@ -230,6 +249,14 @@ func splitParagraphs(text string) []string {
 			continue
 		}
 
+		if isMarkdownHeading(line) {
+			paragraph := strings.TrimSpace(current.String())
+			if paragraph != "" {
+				paragraphs = append(paragraphs, paragraph)
+				current.Reset()
+			}
+		}
+
 		if current.Len() > 0 {
 			current.WriteString("\n")
 		}
@@ -244,7 +271,7 @@ func splitParagraphs(text string) []string {
 	return paragraphs
 }
 
-func suffixByRunes(text string, limit int) string {
+func suffixByBoundary(text string, limit int) string {
 	if limit <= 0 {
 		return ""
 	}
@@ -254,7 +281,85 @@ func suffixByRunes(text string, limit int) string {
 		return string(runes)
 	}
 
-	return strings.TrimSpace(string(runes[len(runes)-limit:]))
+	candidate := runes[len(runes)-limit:]
+	minSuffixLen := limit / 3
+	if minSuffixLen < 20 {
+		minSuffixLen = 20
+	}
+
+	for i, r := range candidate {
+		if !isSentenceBoundary(r) {
+			continue
+		}
+		suffix := strings.TrimSpace(string(candidate[i+1:]))
+		if len([]rune(suffix)) >= minSuffixLen {
+			return suffix
+		}
+	}
+
+	return strings.TrimSpace(string(candidate))
+}
+
+func isMarkdownHeading(line string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" || line[0] != '#' {
+		return false
+	}
+
+	level := 0
+	for _, r := range line {
+		if r != '#' {
+			break
+		}
+		level++
+	}
+
+	if level == 0 || level > 6 || len([]rune(line)) <= level {
+		return false
+	}
+
+	return []rune(line)[level] == ' '
+}
+
+func isSentenceBoundary(r rune) bool {
+	switch r {
+	case '\n', '.', '!', '?', ';', ':', '。', '！', '？', '；', '：':
+		return true
+	default:
+		return false
+	}
+}
+
+func extractFirstMarkdownHeading(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		if !isMarkdownHeading(line) {
+			continue
+		}
+		return strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), "#"))
+	}
+	return ""
+}
+
+func formatDocumentMetadata(metadata map[string]any) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, 4)
+	if source, ok := metadata["source"].(string); ok && source != "" {
+		parts = append(parts, "source="+source)
+	}
+	if section, ok := metadata["section"].(string); ok && section != "" {
+		parts = append(parts, "section="+section)
+	}
+	if chunkIndex, ok := metadata["chunk_index"].(int); ok {
+		parts = append(parts, fmt.Sprintf("chunk_index=%d", chunkIndex))
+	}
+	if chunkTotal, ok := metadata["chunk_total"].(int); ok {
+		parts = append(parts, fmt.Sprintf("chunk_total=%d", chunkTotal))
+	}
+
+	return strings.Join(parts, "; ")
 }
 
 func getChunkConfig() (int, int) {
@@ -377,6 +482,14 @@ func BuildRAGPrompt(query string, docs []*schema.Document) string {
 
 	var contextText strings.Builder
 	for i, doc := range docs {
+		metadata := ""
+		if v, ok := doc.MetaData["metadata"].(string); ok {
+			metadata = strings.TrimSpace(v)
+		}
+		if metadata != "" {
+			contextText.WriteString(fmt.Sprintf("[Document %d | %s]: %s\n\n", i+1, metadata, doc.Content))
+			continue
+		}
 		contextText.WriteString(fmt.Sprintf("[Document %d]: %s\n\n", i+1, doc.Content))
 	}
 
